@@ -1,12 +1,12 @@
 import json
 import hashlib
 import re
+import random
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from sentence_transformers import SentenceTransformer, util
 import ollama
-import random
 
 app = Flask(__name__)
 CORS(app)
@@ -31,12 +31,39 @@ IDENTITY_RESPONSES = {
     r"\bdo you store (my )?(photos|images|video)\b": "No — I only ever store short text descriptions of what was seen, never raw photos or video. That's a core part of how I'm designed.",
 }
 
+SOCIAL_RESPONSES = {
+    r"^(thank you|thanks|thank u|thx|ty)[\s!.]*$": [
+        "You're welcome!",
+        "Anytime!",
+        "Happy to help.",
+    ],
+    r"^(ok|okay|alright|got it|cool|nice|great)[\s!.]*$": [
+        "👍",
+        "Sounds good.",
+    ],
+    r"^(bye|goodbye|see you|see ya)[\s!.]*$": [
+        "See you later!",
+        "Take care!",
+    ],
+    r"^(good morning|good afternoon|good evening|good night)[\s!.]*$": [
+        "Hope it's a good one!",
+    ],
+}
 
-def check_identity_question(query):
-    q = query.lower().strip()
+
+def check_identity_question(query_text):
+    q = query_text.lower().strip()
     for pattern, response in IDENTITY_RESPONSES.items():
         if re.search(pattern, q):
             return response
+    return None
+
+
+def check_social_question(query_text):
+    q = query_text.lower().strip()
+    for pattern, responses in SOCIAL_RESPONSES.items():
+        if re.search(pattern, q):
+            return random.choice(responses)
     return None
 
 
@@ -116,8 +143,8 @@ def humanize_timestamp(ts_string):
     return f"{day_part} at {time_part}"
 
 
-def is_summary_question(query):
-    q = query.lower().strip()
+def is_summary_question(query_text):
+    q = query_text.lower().strip()
     return any(trigger in q for trigger in SUMMARY_TRIGGERS)
 
 
@@ -128,12 +155,12 @@ def get_todays_memories(memories):
     return todays
 
 
-def retrieve_memories(query, memories):
+def retrieve_memories(query_text, memories):
     if not memories:
         return []
     captions = [m["caption"] for m in memories]
     caption_embeddings = embed_model.encode(captions, convert_to_tensor=True)
-    query_embedding = embed_model.encode(query, convert_to_tensor=True)
+    query_embedding = embed_model.encode(query_text, convert_to_tensor=True)
     scores = util.cos_sim(query_embedding, caption_embeddings)[0]
 
     top_results = scores.topk(min(TOP_K, len(memories)))
@@ -150,7 +177,7 @@ def retrieve_memories(query, memories):
     return retrieved
 
 
-def build_prompt(query, retrieved, is_summary=False):
+def build_prompt(query_text, retrieved, is_summary=False):
     context_lines = [f"- {humanize_timestamp(m['timestamp'])}, saw: {m['caption']}" for m in retrieved]
     context = "\n".join(context_lines)
 
@@ -179,7 +206,7 @@ Below is every memory captured today, in chronological order.
 Today's memories:
 {context}
 
-Question: {query}
+Question: {query_text}
 
 Answer:"""
 
@@ -190,27 +217,12 @@ The memories below are listed in the order they happened, judged most relevant t
 {pov_rules}
 
 {base_rules}
+- If unsure these memories answer the question, say so, then briefly mention the related memories naturally, instead of guessing.
 
 Memories:
 {context}
 
-Question: {query}
-
-Answer:"""
-
-    return f"""You are Cortex, a personal memory assistant speaking directly to the user.
-
-The memories below are listed in the order they happened, judged most relevant to the question.
-
-{pov_rules}
-
-{base_rules}
-- If unsure these memories answer the question, say so, then list the key related memories with times instead of guessing.
-
-Memories:
-{context}
-
-Question: {query}
+Question: {query_text}
 
 Answer:"""
 
@@ -229,9 +241,6 @@ def query():
     if not username or not user_query:
         return jsonify({"error": "Missing username or query"}), 400
 
-    identity_answer = check_identity_question(user_query)
-    if identity_answer:
-        return jsonify({"answer": identity_answer})
     identity_answer = check_identity_question(user_query)
     if identity_answer:
         return jsonify({"answer": identity_answer})
@@ -255,33 +264,6 @@ def query():
 
     answer = generate_answer(prompt)
     return jsonify({"answer": answer})
-SOCIAL_RESPONSES = {
-    r"^(thank you|thanks|thank u|thx|ty)[\s!.]*$": [
-        "You're welcome!",
-        "Anytime!",
-        "Happy to help.",
-    ],
-    r"^(ok|okay|alright|got it|cool|nice|great)[\s!.]*$": [
-        "👍",
-        "Sounds good.",
-    ],
-    r"^(bye|goodbye|see you|see ya)[\s!.]*$": [
-        "See you later!",
-        "Take care!",
-    ],
-    r"^(good morning|good afternoon|good evening|good night)[\s!.]*$": [
-        "Hope it's a good one!",
-    ],
-}
-
-
-def check_social_question(query):
-    import random
-    q = query.lower().strip()
-    for pattern, responses in SOCIAL_RESPONSES.items():
-        if re.search(pattern, q):
-            return random.choice(responses)
-    return None
 
 
 @app.route("/api/memory-count", methods=["GET"])
@@ -307,7 +289,6 @@ def check_username():
     if username not in users:
         return jsonify({"available": True, "suggestions": []})
 
-    # Generate suggestions
     suggestions = []
     candidates = [
         f"{username}2026",
@@ -334,7 +315,6 @@ def highlights():
     if not todays:
         return jsonify({"highlights": [], "date": datetime.now().strftime("%A, %B %d")})
 
-    # Take a spread of distinct moments across the day (max 5)
     step = max(1, len(todays) // 5)
     sample = todays[::step][:5]
 

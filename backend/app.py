@@ -6,6 +6,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from sentence_transformers import SentenceTransformer, util
+import torch
 import ollama
 
 app = Flask(__name__)
@@ -29,6 +30,7 @@ IDENTITY_RESPONSES = {
     r"\bhow do you work\b": "A camera captures moments, an AI describes each one in a sentence, and when you ask a question, I find the most relevant memories and answer using only what was actually seen.",
     r"\bare you (an ai|a bot|real)\b": "Yes, I'm an AI assistant — I don't have memories of my own, only the ones captured from your day.",
     r"\bdo you store (my )?(photos|images|video)\b": "No — I only ever store short text descriptions of what was seen, never raw photos or video. That's a core part of how I'm designed.",
+    r"\bwho made you":"Tanish Sinha, Vani Goel and Glenn Monteiro designed me.",
 }
 
 SOCIAL_RESPONSES = {
@@ -156,11 +158,35 @@ def get_todays_memories(memories):
 
 
 def retrieve_memories(query_text, memories):
+    """Finds the top-k most relevant memories. Uses cached embeddings stored at capture
+    time when available, only computing (and backfilling) embeddings for older entries
+    that don't have one yet — this avoids re-embedding every memory on every query."""
     if not memories:
         return []
-    captions = [m["caption"] for m in memories]
-    caption_embeddings = embed_model.encode(captions, convert_to_tensor=True)
+
+    needs_backfill = False
+    embeddings_list = []
+    for m in memories:
+        if "embedding" in m:
+            embeddings_list.append(m["embedding"])
+        else:
+            emb = embed_model.encode(m["caption"]).tolist()
+            m["embedding"] = emb
+            embeddings_list.append(emb)
+            needs_backfill = True
+
+    if needs_backfill:
+        all_memories = load_memory_log()
+        lookup = {(m["filename"], m["timestamp"]): m for m in memories}
+        for entry in all_memories:
+            key = (entry["filename"], entry["timestamp"])
+            if key in lookup and "embedding" not in entry:
+                entry["embedding"] = lookup[key]["embedding"]
+        with open(LOG_FILE, "w") as f:
+            json.dump(all_memories, f, indent=2)
+
     query_embedding = embed_model.encode(query_text, convert_to_tensor=True)
+    caption_embeddings = torch.tensor(embeddings_list).to(query_embedding.device)
     scores = util.cos_sim(query_embedding, caption_embeddings)[0]
 
     top_results = scores.topk(min(TOP_K, len(memories)))
@@ -176,8 +202,85 @@ def retrieve_memories(query_text, memories):
     retrieved.sort(key=lambda m: m["timestamp"])
     return retrieved
 
+REMEMBER_PATTERN = r"^remember (that )?(.+)"
 
-def build_prompt(query_text, retrieved, is_summary=False):
+
+def check_remember_command(query_text):
+    match = re.match(REMEMBER_PATTERN, query_text.strip(), re.IGNORECASE)
+    if match:
+        return match.group(2).strip()
+    return None
+
+
+def save_note(username, note_text):
+    """Stores an explicitly user-stated fact as a memory, same shape as captured memories,
+    so it can be found later through normal retrieval — but tagged as a note, not a captured moment."""
+    all_memories = load_memory_log()
+    timestamp = datetime.now().isoformat()
+    caption = f"You said: {note_text}"
+    embedding = embed_model.encode(caption).tolist()
+
+    all_memories.append({
+        "filename": None,
+        "caption": caption,
+        "timestamp": timestamp,
+        "embedding": embedding,
+        "owner": username,
+        "source": "note"
+    })
+
+    with open(LOG_FILE, "w") as f:
+        json.dump(all_memories, f, indent=2)
+        
+FORGET_PATTERN = r"^(forget|delete)( that| the memory( that| about)?)? (.+)"
+
+
+def check_forget_command(query_text):
+    match = re.match(FORGET_PATTERN, query_text.strip(), re.IGNORECASE)
+    if match:
+        return match.group(4).strip()
+    return None
+
+
+def delete_memory(username, target_text):
+    """Finds the single best-matching memory for this user and removes it entirely."""
+    memories = get_user_memories(username)
+    if not memories:
+        return None
+
+    retrieved = retrieve_memories(target_text, memories)
+    if not retrieved:
+        return None
+
+    best_match = retrieved[0]  # already sorted, but we want highest score, not chronological — see note below
+
+    # retrieve_memories sorts chronologically, so instead re-find the single highest-scoring match directly
+    query_embedding = embed_model.encode(target_text, convert_to_tensor=True)
+    embeddings_list = [m["embedding"] for m in memories if "embedding" in m]
+    if not embeddings_list:
+        return None
+    caption_embeddings = torch.tensor(embeddings_list).to(query_embedding.device)
+    scores = util.cos_sim(query_embedding, caption_embeddings)[0]
+    best_idx = scores.argmax().item()
+    best_score = scores[best_idx].item()
+
+    if best_score < MIN_SCORE:
+        return None
+
+    target = memories[best_idx]
+
+    all_memories = load_memory_log()
+    all_memories = [
+        m for m in all_memories
+        if not (m["filename"] == target["filename"] and m["timestamp"] == target["timestamp"])
+    ]
+
+    with open(LOG_FILE, "w") as f:
+        json.dump(all_memories, f, indent=2)
+
+    return target["caption"]
+
+def build_prompt(query_text, retrieved, is_summary=False, support_mode=False):
     context_lines = [f"- {humanize_timestamp(m['timestamp'])}, saw: {m['caption']}" for m in retrieved]
     context = "\n".join(context_lines)
 
@@ -186,11 +289,31 @@ def build_prompt(query_text, retrieved, is_summary=False):
 - If a memory describes a full person, that is someone ELSE the camera saw — describe it as "you saw someone..." (third person, about another person).
 - Never refer to the user themselves as "someone" or "the person" — the user is always "you"."""
 
+    if support_mode:
+        return f"""You are Cortex, speaking gently to someone who finds complex sentences hard to follow.
+
+Rules:
+- Use very simple words and short sentences, no more than 10-12 words each.
+- Be warm, calm, and reassuring in tone, like a kind friend.
+- Avoid exact clock times — say "earlier today" or "a little while ago" instead of "3:42 PM".
+- Never imply the person forgot something or should have remembered — just answer plainly and kindly.
+- State the one key fact clearly. Do not add extra details, lists, or context that isn't needed.
+- Only use facts directly in the memories below. Never invent anything.
+
+{pov_rules}
+
+Memories:
+{context}
+
+Question: {query_text}
+
+Answer:"""
+
     base_rules = """Rules:
 - Write your answer as natural, flowing spoken sentences — the way a person would casually tell a friend. NEVER use bullet points, asterisks, dashes, or a "Key related memories:" style list.
 - Weave the time naturally into the sentence (e.g. "Around 3 PM, you had your laptop out on your desk") instead of stating it separately.
 - Only use facts directly stated in the memories. Do not invent objects, actions, locations, or events.
-- If you're not fully certain, say so naturally in the sentence itself (e.g. "I'm not totally sure, but the last time I saw it was...") rather than listing raw memory fragments.
+- If you're not fully certain, say so naturally in the sentence itself rather than listing raw memory fragments.
 - Keep it to 1-3 sentences, conversational and confident, not robotic."""
 
     if is_summary:
@@ -227,8 +350,9 @@ Question: {query_text}
 Answer:"""
 
 
-def generate_answer(prompt):
-    response = ollama.generate(model="llama3.2", prompt=prompt, options={"temperature": 0.1})
+def generate_answer(prompt, support_mode=False):
+    temperature = 0.05 if support_mode else 0.1
+    response = ollama.generate(model="llama3.2", prompt=prompt, options={"temperature": temperature})
     return response["response"].strip()
 
 
@@ -237,6 +361,7 @@ def query():
     data = request.json
     username = data.get("username")
     user_query = data.get("query", "").strip()
+    support_mode = data.get("support_mode", False)
 
     if not username or not user_query:
         return jsonify({"error": "Missing username or query"}), 400
@@ -244,25 +369,49 @@ def query():
     identity_answer = check_identity_question(user_query)
     if identity_answer:
         return jsonify({"answer": identity_answer})
-
+    
     social_answer = check_social_question(user_query)
     if social_answer:
         return jsonify({"answer": social_answer})
+
+    note_text = check_remember_command(user_query)
+    if note_text:
+        save_note(username, note_text)
+        confirmation = f"Got it — I'll remember that {note_text.lower() if not note_text[0].isupper() else note_text[0].lower() + note_text[1:]}."
+        return jsonify({"answer": confirmation})
+
+
+    note_text = check_remember_command(user_query)
+    if note_text:
+        save_note(username, note_text)
+        confirmation = f"Got it — I'll remember that {note_text}."
+        return jsonify({"answer": confirmation})
+
+    forget_text = check_forget_command(user_query)
+    if forget_text:
+        deleted_caption = delete_memory(username, forget_text)
+        if deleted_caption:
+            return jsonify({"answer": f"Done — I've forgotten that memory."})
+        else:
+            return jsonify({"answer": "I couldn't find a memory matching that, so nothing was deleted."})
+        
 
     memories = get_user_memories(username)
 
     if is_summary_question(user_query):
         todays = get_todays_memories(memories)
         if not todays:
-            return jsonify({"answer": "I don't have any memories from today."})
-        prompt = build_prompt(user_query, todays, is_summary=True)
+            msg = "Nothing yet today." if support_mode else "I don't have any memories from today."
+            return jsonify({"answer": msg})
+        prompt = build_prompt(user_query, todays, is_summary=True, support_mode=support_mode)
     else:
         retrieved = retrieve_memories(user_query, memories)
         if not retrieved:
-            return jsonify({"answer": "I don't have any memory related to that."})
-        prompt = build_prompt(user_query, retrieved, is_summary=False)
+            msg = "I don't know that one yet." if support_mode else "I don't have any memory related to that."
+            return jsonify({"answer": msg})
+        prompt = build_prompt(user_query, retrieved, is_summary=False, support_mode=support_mode)
 
-    answer = generate_answer(prompt)
+    answer = generate_answer(prompt, support_mode=support_mode)
     return jsonify({"answer": answer})
 
 
@@ -294,8 +443,8 @@ def check_username():
         f"{username}2026",
         f"{username}{random.randint(10, 99)}",
         f"{username}_{random.randint(1, 999)}",
+        f"the_{username}_official",
         f"the_{username}",
-        f"{username}_official",
     ]
     for c in candidates:
         if c not in users and c not in suggestions:

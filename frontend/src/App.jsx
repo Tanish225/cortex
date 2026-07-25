@@ -129,6 +129,11 @@ const FEATURES = [
     desc: "A running recap of your day's key moments, always one tap away.",
   },
   {
+    icon: "🧓",
+    title: "Memory support mode",
+    desc: "Simpler words, calmer answers, and larger text — designed for elderly and memory-impaired users.",
+  },
+  {
     icon: "⬡",
     title: "Yours alone",
     desc: "Every account's memories are private and fully separated from everyone else's.",
@@ -270,6 +275,8 @@ function SettingRow({ label, value, onChange, colors }) {
           position: "relative",
           cursor: "pointer",
           transition: "background 0.2s ease",
+          flexShrink: 0,
+          marginLeft: 12,
         }}
       >
         <span
@@ -341,6 +348,7 @@ export default function App() {
   const [memoryCount, setMemoryCount] = useState(0);
   const [listening, setListening] = useState(false);
   const [speakEnabled, setSpeakEnabled] = useState(true);
+  const [supportMode, setSupportMode] = useState(false); // memory support mode (elderly / Alzheimer's-friendly)
   const [showSettings, setShowSettings] = useState(false);
   const [showHighlights, setShowHighlights] = useState(false);
   const [highlights, setHighlights] = useState([]);
@@ -484,6 +492,7 @@ export default function App() {
     if (!speakEnabled) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = supportMode ? 0.8 : 1.0;
     window.speechSynthesis.speak(utterance);
   }
 
@@ -513,7 +522,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, query }),
+        body: JSON.stringify({ username, query, support_mode: supportMode }),
       });
       const data = await res.json();
       const answer = data.answer || "Something went wrong.";
@@ -538,6 +547,9 @@ export default function App() {
     assistantText: isDark ? "#f5f5f7" : "#1d1d1f",
     inputBg: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.04)",
   };
+
+  const bubbleFontSize = supportMode ? 19 : 15;
+  const inputFontSize = supportMode ? 17 : 15;
 
   // ---------- Home screen (before auth) ----------
   if (!loggedIn && view === "home") {
@@ -812,6 +824,12 @@ export default function App() {
               </div>
               <SettingRow label="Speak responses aloud" value={speakEnabled} onChange={() => setSpeakEnabled(!speakEnabled)} colors={colors} />
               <SettingRow label="Dark mode" value={isDark} onChange={() => setTheme(isDark ? "light" : "dark")} colors={colors} />
+              <SettingRow
+                label="Memory support mode (larger text, gentler answers)"
+                value={supportMode}
+                onChange={() => setSupportMode(!supportMode)}
+                colors={colors}
+              />
             </div>
           )}
 
@@ -828,7 +846,7 @@ export default function App() {
                     maxWidth: "75%",
                     padding: "10px 16px",
                     borderRadius: 18,
-                    fontSize: 15,
+                    fontSize: bubbleFontSize,
                     lineHeight: 1.4,
                     background: m.role === "user" ? colors.userBubble : colors.assistantBubble,
                     color: m.role === "user" ? "#fff" : colors.assistantText,
@@ -862,8 +880,8 @@ export default function App() {
             <button
               onClick={toggleListening}
               style={{
-                width: 40,
-                height: 40,
+                width: supportMode ? 48 : 40,
+                height: supportMode ? 48 : 40,
                 borderRadius: "50%",
                 border: "none",
                 flexShrink: 0,
@@ -883,12 +901,12 @@ export default function App() {
               placeholder={listening ? "Listening..." : "Ask about your memories..."}
               style={{
                 flex: 1,
-                padding: "12px 16px",
+                padding: supportMode ? "14px 18px" : "12px 16px",
                 borderRadius: 20,
                 border: "none",
                 background: colors.inputBg,
                 color: colors.text,
-                fontSize: 15,
+                fontSize: inputFontSize,
                 outline: "none",
               }}
             />
@@ -896,8 +914,8 @@ export default function App() {
               onClick={() => sendMessage()}
               disabled={loading || !input.trim()}
               style={{
-                width: 40,
-                height: 40,
+                width: supportMode ? 48 : 40,
+                height: supportMode ? 48 : 40,
                 borderRadius: "50%",
                 border: "none",
                 background: colors.userBubble,

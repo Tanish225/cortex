@@ -2,6 +2,33 @@ import { useState, useEffect, useRef } from "react";
 
 const API_BASE = "http://localhost:5001/api";
 
+// ---------- Helper: Synthesize a pleasant chime sound ----------
+function playActivationChime() {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15); // A5
+
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.25);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start();
+    osc.stop(ctx.currentTime + 0.25);
+  } catch (e) {
+    // AudioContext blocked or unsupported
+  }
+}
+
 // ---------- Custom logo (no emoji, pure SVG) ----------
 function CortexLogo({ size = 40 }) {
   const id = useRef(`grad-${Math.random().toString(36).slice(2)}`).current;
@@ -355,6 +382,13 @@ export default function App() {
   const [todayDate, setTodayDate] = useState("");
   const [backendOnline, setBackendOnline] = useState(null);
   const [toasts, setToasts] = useState([]);
+
+  const [wakeWordEnabled, setWakeWordEnabled] = useState(false);
+  const [awaitingWakeWord, setAwaitingWakeWord] = useState(false);
+  const [flashScreen, setFlashScreen] = useState(false);
+  const autoSendRef = useRef(false);
+
+  const wakeRecognitionRef = useRef(null);
   const chatEndRef = useRef(null);
   const recognitionRef = useRef(null);
   const usernameCheckTimeout = useRef(null);
@@ -399,15 +433,97 @@ export default function App() {
       recog.continuous = false;
       recog.interimResults = false;
       recog.lang = "en-US";
+
       recog.onresult = (e) => {
-        setInput(e.results[0][0].transcript);
+        const transcriptText = e.results[0][0].transcript;
+        setInput(transcriptText);
+        setListening(false);
+
+        // Hands-free trigger: if activated via wake word, automatically send query
+        if (autoSendRef.current) {
+          autoSendRef.current = false;
+          sendMessage(transcriptText);
+        }
+      };
+
+      recog.onerror = () => {
+        setListening(false);
+        autoSendRef.current = false;
+      };
+
+      recog.onend = () => {
         setListening(false);
       };
-      recog.onerror = () => setListening(false);
-      recog.onend = () => setListening(false);
+
       recognitionRef.current = recog;
     }
-  }, []);
+  }, [username, supportMode]);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    if (!wakeWordEnabled || !loggedIn || listening) {
+      // stop background listening while a real question is being captured, or if disabled
+      if (wakeRecognitionRef.current) {
+        wakeRecognitionRef.current.stop();
+        wakeRecognitionRef.current = null;
+      }
+      setAwaitingWakeWord(false);
+      return;
+    }
+
+    const wakeRecog = new SpeechRecognition();
+    wakeRecog.continuous = true;
+    wakeRecog.interimResults = true;
+    wakeRecog.lang = "en-US";
+
+    wakeRecog.onresult = (e) => {
+      const lastResult = e.results[e.results.length - 1];
+      const transcript = lastResult[0].transcript.toLowerCase();
+
+      if (transcript.includes("hey cortex") || transcript.includes("hey, cortex")) {
+        wakeRecog.stop();
+
+        // 1. Audio chime feedback
+        playActivationChime();
+
+        // 2. Visual screen flash feedback
+        setFlashScreen(true);
+        setTimeout(() => setFlashScreen(false), 400);
+
+        // 3. Mark for automatic sending hands-free
+        autoSendRef.current = true;
+
+        setTimeout(() => toggleListening(), 300); // hand off to normal question capture
+      }
+    };
+
+    wakeRecog.onerror = (e) => {
+      if (e.error !== "no-speech" && e.error !== "aborted") {
+        setAwaitingWakeWord(false);
+      }
+    };
+
+    wakeRecog.onend = () => {
+      // browsers auto-stop continuous recognition periodically — restart if still enabled
+      if (wakeWordEnabled && loggedIn && !listening) {
+        try {
+          wakeRecog.start();
+        } catch (e) {}
+      }
+    };
+
+    wakeRecognitionRef.current = wakeRecog;
+    setAwaitingWakeWord(true);
+    try {
+      wakeRecog.start();
+    } catch (e) {}
+
+    return () => {
+      wakeRecog.stop();
+    };
+  }, [wakeWordEnabled, loggedIn, listening]);
 
   useEffect(() => {
     if (authMode !== "signup" || !authUsername.trim()) {
@@ -576,6 +692,21 @@ export default function App() {
         @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
       `}</style>
+
+      {/* Screen flash visual indicator */}
+      {flashScreen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(10, 132, 255, 0.25)",
+            backdropFilter: "blur(4px)",
+            zIndex: 9999,
+            pointerEvents: "none",
+            transition: "opacity 0.3s ease",
+          }}
+        />
+      )}
 
       <div style={{ position: "fixed", top: 20, right: 20, zIndex: 1000, display: "flex", flexDirection: "column" }}>
         {toasts.map((t) => (
@@ -823,6 +954,12 @@ export default function App() {
                 ACCESSIBILITY
               </div>
               <SettingRow label="Speak responses aloud" value={speakEnabled} onChange={() => setSpeakEnabled(!speakEnabled)} colors={colors} />
+              <SettingRow
+                label='Wake word ("Hey Cortex")'
+                value={wakeWordEnabled}
+                onChange={() => setWakeWordEnabled(!wakeWordEnabled)}
+                colors={colors}
+              />
               <SettingRow label="Dark mode" value={isDark} onChange={() => setTheme(isDark ? "light" : "dark")} colors={colors} />
               <SettingRow
                 label="Memory support mode (larger text, gentler answers)"
@@ -865,6 +1002,19 @@ export default function App() {
             )}
             <div ref={chatEndRef} />
           </div>
+
+          {awaitingWakeWord && !listening && (
+            <div
+              style={{
+                textAlign: "center",
+                fontSize: 12,
+                color: colors.subtext,
+                padding: "6px 0",
+              }}
+            >
+              Listening for "Hey Cortex"...
+            </div>
+          )}
 
           <div
             style={{

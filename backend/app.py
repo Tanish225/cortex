@@ -12,7 +12,7 @@ import ollama
 app = Flask(__name__)
 CORS(app)
 
-LOG_FILE = "memory_log.json"
+LOG_FILE = "../memory_log.json"
 USERS_FILE = "users.json"
 TOP_K = 5
 MIN_SCORE = 0.15

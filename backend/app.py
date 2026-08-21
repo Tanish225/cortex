@@ -318,6 +318,7 @@ Question: {query_text}
 Answer:"""
 
     base_rules = """Rules:
+- STRICT FACT-CHECKING: You are strictly forbidden from inventing, guessing, or hallucinating ANY details, locations, emotions, objects, or actions. You must ONLY state exactly what is written in the memories below.
 - Write your answer as natural, flowing spoken sentences — the way a person would casually tell a friend. NEVER use bullet points, asterisks, dashes, or a "Key related memories:" style list.
 - Weave the time naturally into the sentence (e.g. "Around 3 PM, you had your laptop out on your desk") instead of stating it separately.
 - Only use facts directly stated in the memories. Do not invent objects, actions, locations, or events.

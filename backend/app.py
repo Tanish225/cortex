@@ -12,7 +12,7 @@ import ollama
 app = Flask(__name__)
 CORS(app)
 
-LOG_FILE = "../memory_log.json"
+LOG_FILE = "/Users/tanishsinha/second-brain-poc/second-brain-poc/backend/memory_log.json"
 USERS_FILE = "users.json"
 TOP_K = 5
 MIN_SCORE = 0.15
@@ -292,10 +292,11 @@ def build_prompt(query_text, retrieved, is_summary=False, support_mode=False):
     context_lines = [f"- {humanize_timestamp(m['timestamp'])}, saw: {m['caption']}" for m in retrieved]
     context = "\n".join(context_lines)
 
-    pov_rules = """POV rules:
-- If a memory describes hands, an object being held, or a close-up view, that is the user's OWN point of view — describe it as "you were holding/using..." (first person, direct).
-- If a memory describes a full person, that is someone ELSE the camera saw — describe it as "you saw someone..." (third person, about another person).
-- Never refer to the user themselves as "someone" or "the person" — the user is always "you"."""
+    pov_rules = '''POV Rules (CRITICAL):
+- The camera is worn on your face. 
+- If a memory describes "a hand", "hands", or an object being held close up, IT IS YOUR HAND. You MUST say "You were holding..." or "You had...". 
+- Do not say "you saw a hand" or "someone else" unless the memory explicitly says "a person" or "someone".
+- Translating "a hand" to "your hand" is REQUIRED and is NOT considered hallucinating.'''
 
     if support_mode:
         return f"""You are Cortex, speaking gently to someone who finds complex sentences hard to follow.
@@ -303,7 +304,7 @@ def build_prompt(query_text, retrieved, is_summary=False, support_mode=False):
 Rules:
 - Use very simple words and short sentences, no more than 10-12 words each.
 - Be warm, calm, and reassuring in tone, like a kind friend.
-- Avoid exact clock times — say "earlier today" or "a little while ago" instead of "3:42 PM".
+- Avoid only using exact clock times — say "earlier today" or "a little while ago" also mention of "3:42 PM" if make sense.
 - Never imply the person forgot something or should have remembered — just answer plainly and kindly.
 - State the one key fact clearly. Do not add extra details, lists, or context that isn't needed.
 - Only use facts directly in the memories below. Never invent anything.
@@ -318,12 +319,10 @@ Question: {query_text}
 Answer:"""
 
     base_rules = """Rules:
-- STRICT FACT-CHECKING: You are strictly forbidden from inventing, guessing, or hallucinating ANY details, locations, emotions, objects, or actions. You must ONLY state exactly what is written in the memories below.
-- Write your answer as natural, flowing spoken sentences — the way a person would casually tell a friend. NEVER use bullet points, asterisks, dashes, or a "Key related memories:" style list.
-- Weave the time naturally into the sentence (e.g. "Around 3 PM, you had your laptop out on your desk") instead of stating it separately.
-- Only use facts directly stated in the memories. Do not invent objects, actions, locations, or events.
-- If you're not fully certain, say so naturally in the sentence itself rather than listing raw memory fragments.
-- Keep it to 1-3 sentences, conversational and confident, not robotic."""
+- STRICT FACT-CHECKING: You are strictly forbidden from inventing details, locations, or actions. You must ONLY state what is written, while following the POV rules above.
+- Write your answer as natural, flowing spoken sentences. NEVER use bullet points.
+- Weave the time naturally into the sentence (e.g. "Around 7:42 AM, you...").
+- Keep your answer concise if the memory is short."""
 
     if is_summary:
         return f"""You are Cortex, a personal memory assistant speaking directly to the user.

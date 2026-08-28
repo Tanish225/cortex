@@ -305,9 +305,49 @@ cd cortex
 
 ## 2. Install Ollama
 
-Install Ollama for your operating system and make sure it is running.
+CORTEX uses Ollama to run the language model locally.
 
-Pull the language model used by CORTEX:
+### Windows
+
+Open PowerShell and run:
+
+```powershell
+irm https://ollama.com/install.ps1 | iex
+```
+
+Alternatively, download the Windows installer from the [official Ollama website](https://ollama.com/download/windows).
+
+After installation, close and reopen PowerShell.
+
+### macOS
+
+Download and install Ollama from the [official Ollama website](https://ollama.com/download/mac).
+
+### Linux
+
+Run:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+### Verify the installation
+
+```bash
+ollama --version
+```
+
+If Ollama is not already running, start it with:
+
+```bash
+ollama serve
+```
+
+Keep this terminal open and use another terminal for the following commands.
+
+### Download the model
+
+CORTEX uses Llama 3.2:
 
 ```bash
 ollama pull llama3.2

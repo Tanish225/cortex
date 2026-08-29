@@ -310,6 +310,31 @@ export default function App() {
     try { const res = await fetch(`${API_BASE}/highlights?username=${username}`); const data = await res.json(); setHighlights(data.highlights || []); setTodayDate(data.date || ""); } catch (e) {}
   }
 
+  // ---------- New Live Capture Function ----------
+  const handleLiveCapture = async () => {
+    if (!username) return; 
+
+    try {
+      const response = await fetch(`${API_BASE}/capture`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username }) 
+      });
+      
+      const data = await response.json();
+      if (response.ok) {
+        pushToast("New memory captured securely!", "success");
+        fetchMemoryCount(); // Update the memory counter
+        fetchHighlights(); // Optionally update highlights if relevant
+      } else {
+        pushToast("Error capturing memory: " + data.error, "error");
+      }
+    } catch (error) {
+      console.error("Capture failed:", error);
+      pushToast("Failed to connect to the camera backend.", "error");
+    }
+  };
+
   async function openMemoryManager() {
     if (showManager) { setShowManager(false); return; }
     try {
@@ -532,7 +557,6 @@ export default function App() {
                 <button className="icon-btn" onClick={() => setShowManager(false)} style={{ background: "transparent", border: "none", color: colors.subtext, fontSize: 16 }}>×</button>
               </div>
 
-              {/* Add Memory Input Field */}
               <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
                 <input
                   placeholder="Add a new memory manually..."
@@ -580,6 +604,17 @@ export default function App() {
           
           <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 20px 22px", background: colors.panel, backdropFilter: "blur(20px)", borderTop: `1px solid ${colors.panelBorder}` }}>
             <button className="icon-btn" onClick={toggleListening} style={{ width: supportMode ? 48 : 40, height: supportMode ? 48 : 40, borderRadius: "50%", border: "none", flexShrink: 0, background: listening ? "#ff453a" : colors.inputBg, color: listening ? "#fff" : colors.text, fontSize: 16 }} title="Speak your question">🎤</button>
+            
+            {/* ---------- NEW LIVE CAPTURE BUTTON ---------- */}
+            <button 
+              className="icon-btn" 
+              onClick={handleLiveCapture} 
+              style={{ width: supportMode ? 48 : 40, height: supportMode ? 48 : 40, borderRadius: "50%", border: "none", flexShrink: 0, background: colors.inputBg, color: colors.text, fontSize: 16 }} 
+              title="Capture Live Memory"
+            >
+              📸
+            </button>
+
             <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendMessage()} placeholder={listening ? "Listening..." : "Ask about your memories..."} style={{ flex: 1, padding: supportMode ? "14px 18px" : "12px 16px", borderRadius: 20, border: `1px solid ${colors.panelBorder}`, background: colors.inputBg, color: colors.text, fontSize: inputFontSize, outline: "none", transition: "background 0.2s" }} />
             <button className="primary-btn" onClick={() => sendMessage()} disabled={loading || !input.trim()} style={{ width: supportMode ? 48 : 40, height: supportMode ? 48 : 40, borderRadius: "50%", border: "none", background: colors.userBubble, color: "#fff", fontSize: 16, opacity: loading || !input.trim() ? 0.5 : 1 }}>↑</button>
           </div>

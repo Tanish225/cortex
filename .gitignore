@@ -24,3 +24,8 @@ frontend/*.log
 # General editor/OS junk
 .vscode/
 *.log
+
+# Environment variables / Secrets
+.env
+.env.local
+.env.*

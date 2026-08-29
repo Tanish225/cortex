@@ -8,12 +8,18 @@ from flask_cors import CORS
 from sentence_transformers import SentenceTransformer, util
 import torch
 import ollama
+import os
+from live_capture import capture_and_process
+from transformers import BlipProcessor, BlipForConditionalGeneration
+
+# this automatically finds the folder the script is running in
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))   
 
 app = Flask(__name__)
 CORS(app)
 
-LOG_FILE = "/Users/tanishsinha/second-brain-poc/second-brain-poc/backend/memory_log.json"
-USERS_FILE = "users.json"
+LOG_FILE = os.path.join(BASE_DIR, "memory_log.json")
+USERS_FILE = os.path.join(BASE_DIR, "users.json")
 TOP_K = 5
 MIN_SCORE = 0.15
 SUMMARY_TRIGGERS = [
@@ -27,8 +33,12 @@ SUMMARY_TRIGGERS = [
     "more details of my day"
 ]
 
-print("Loading embedding model...")
+print("Loading AI embedding model...")
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+print("Loading Vision AI model (this takes a few seconds)...")
+processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 
 
 # ---------- Identity / canned answers ----------
@@ -541,6 +551,22 @@ def highlights():
         "highlights": highlight_list,
         "date": datetime.now().strftime("%A, %B %d")
     })
+    
+@app.route('/api/capture', methods=['POST'])
+def api_capture():
+    data = request.json
+    username = data.get('username')
+    
+    if not username:
+        return jsonify({"error": "No user logged in"}), 400
+
+    # This turns on the camera, processes the memory, and drops the photo
+    new_memory = capture_and_process(username, embed_model, processor, model)
+    
+    if new_memory:
+        return jsonify({"message": "Memory captured successfully!", "memory": new_memory}), 200
+    else:
+        return jsonify({"error": "Camera failed"}), 500
 
 
 if __name__ == "__main__":

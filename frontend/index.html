@@ -3,8 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    
+    <!-- Locked viewport to make it feel like a native app (no pinch-to-zoom) -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    
+    <!-- PWA & iOS Native App settings -->
+    <meta name="theme-color" content="#000000" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Cortex" />
+    
+    <!-- Make sure to add a 192x192 image to your public/ folder later! -->
+    <link rel="apple-touch-icon" href="/pwa-192x192.png" />
+    
+    <title>Cortex</title>
   </head>
   <body>
     <div id="root"></div>

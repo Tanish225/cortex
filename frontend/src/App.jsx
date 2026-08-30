@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 
-const API_BASE = "http://localhost:5001/api";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
 // ---------- Helper: Synthesize a pleasant chime sound ----------
 function playActivationChime() {
@@ -207,10 +207,19 @@ export default function App() {
   const [flashScreen, setFlashScreen] = useState(false);
   const autoSendRef = useRef(false);
 
-  const wakeRecognitionRef = useRef(null);
-  const chatEndRef = useRef(null);
+  // ---------- New Consolidated Speech Refs ----------
   const recognitionRef = useRef(null);
+  const chatEndRef = useRef(null);
   const usernameCheckTimeout = useRef(null);
+  const wakeWordEnabledRef = useRef(wakeWordEnabled);
+  const isProcessingRef = useRef(false);
+  const isAwakeRef = useRef(false); 
+  const awakeTimeoutRef = useRef(null); 
+
+  // Keep ref synchronized for speech synthesis callbacks
+  useEffect(() => {
+    wakeWordEnabledRef.current = wakeWordEnabled;
+  }, [wakeWordEnabled]);
 
   function pushToast(message, type = "success") {
     const id = Date.now() + Math.random();
@@ -233,13 +242,100 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // ---------- Unified Speech Recognition Engine ----------
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      const recog = new SpeechRecognition();
+    if (!SpeechRecognition) return;
+
+    if (recognitionRef.current) {
+      try { recognitionRef.current.abort(); } catch (_) {}
+    }
+
+    const recog = new SpeechRecognition();
+
+    if (wakeWordEnabled && loggedIn) {
+      // --- MODE: CONTINUOUS WAKE WORD ---
+      recog.continuous = true;
+      recog.interimResults = false; 
+      recog.lang = "en-US";
+
+      recog.onstart = () => { 
+        setAwaitingWakeWord(true); 
+        setListening(false); 
+      };
+      
+      recog.onresult = (e) => {
+        if (isProcessingRef.current) return;
+        
+        for (let i = e.resultIndex; i < e.results.length; ++i) {
+          const transcript = e.results[i][0].transcript.toLowerCase().trim();
+          
+          // If Cortex is ALREADY awake, capture the command
+          if (isAwakeRef.current) {
+            if (transcript.length > 2) {
+              clearTimeout(awakeTimeoutRef.current);
+              isAwakeRef.current = false;
+              isProcessingRef.current = true;
+              try { recog.abort(); } catch (_) {}
+              sendMessage(transcript);
+            }
+            continue;
+          }
+
+          // If Cortex is asleep, check for wake word
+          const wakeWordRegex = /\b(hey cortex|cortex|hey cortext|hey context|cortes)\b/i;
+          if (wakeWordRegex.test(transcript)) {
+            playActivationChime();
+            setFlashScreen(true);
+            setTimeout(() => setFlashScreen(false), 400);
+
+            let cleanQuery = transcript.replace(wakeWordRegex, "").replace(/[.,?!]/g, "").trim();
+            
+            if (cleanQuery.length > 2) {
+              // Command spoken in the same breath
+              isProcessingRef.current = true;
+              try { recog.abort(); } catch (_) {}
+              sendMessage(cleanQuery);
+            } else {
+              // Pause detected. Wake up and wait for next phrase.
+              isAwakeRef.current = true;
+              pushToast("Listening...", "info");
+              
+              clearTimeout(awakeTimeoutRef.current);
+              awakeTimeoutRef.current = setTimeout(() => {
+                isAwakeRef.current = false;
+                pushToast("Cortex went back to sleep.", "info");
+              }, 6000);
+            }
+          }
+        }
+      };
+
+      recog.onerror = (e) => {
+        if (e.error !== "no-speech" && e.error !== "aborted") console.warn("Speech error:", e.error);
+      };
+
+      recog.onend = () => {
+        setAwaitingWakeWord(false);
+        if (wakeWordEnabledRef.current && !isProcessingRef.current && !window.speechSynthesis.speaking) {
+          setTimeout(() => { try { recog.start(); } catch (_) {} }, 250);
+        }
+      };
+
+      recognitionRef.current = recog;
+      try { recog.start(); } catch (e) {}
+
+    } else if (loggedIn) {
+      // --- MODE: MANUAL PUSH-TO-TALK ---
       recog.continuous = false;
       recog.interimResults = false;
       recog.lang = "en-US";
+
+      recog.onstart = () => { 
+        setListening(true); 
+        setAwaitingWakeWord(false); 
+      };
+      
       recog.onresult = (e) => {
         const transcriptText = e.results[0][0].transcript;
         setInput(transcriptText);
@@ -249,45 +345,19 @@ export default function App() {
           sendMessage(transcriptText);
         }
       };
+
       recog.onerror = () => { setListening(false); autoSendRef.current = false; };
       recog.onend = () => { setListening(false); };
+      
       recognitionRef.current = recog;
     }
-  }, [username, supportMode]);
 
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-
-    if (!wakeWordEnabled || !loggedIn || listening) {
-      if (wakeRecognitionRef.current) { wakeRecognitionRef.current.stop(); wakeRecognitionRef.current = null; }
-      setAwaitingWakeWord(false);
-      return;
-    }
-
-    const wakeRecog = new SpeechRecognition();
-    wakeRecog.continuous = true;
-    wakeRecog.interimResults = true;
-    wakeRecog.lang = "en-US";
-    wakeRecog.onresult = (e) => {
-      const lastResult = e.results[e.results.length - 1];
-      const transcript = lastResult[0].transcript.toLowerCase();
-      if (transcript.includes("hey cortex") || transcript.includes("hey, cortex")) {
-        wakeRecog.stop();
-        playActivationChime();
-        setFlashScreen(true);
-        setTimeout(() => setFlashScreen(false), 400);
-        autoSendRef.current = true;
-        setTimeout(() => toggleListening(), 300);
-      }
+    return () => {
+      try { recog.abort(); } catch (_) {}
+      clearTimeout(awakeTimeoutRef.current);
     };
-    wakeRecog.onerror = (e) => { if (e.error !== "no-speech" && e.error !== "aborted") { setAwaitingWakeWord(false); } };
-    wakeRecog.onend = () => { if (wakeWordEnabled && loggedIn && !listening) { try { wakeRecog.start(); } catch (e) {} } };
-    wakeRecognitionRef.current = wakeRecog;
-    setAwaitingWakeWord(true);
-    try { wakeRecog.start(); } catch (e) {}
-    return () => { wakeRecog.stop(); };
-  }, [wakeWordEnabled, loggedIn, listening]);
+  }, [wakeWordEnabled, loggedIn, supportMode]);
+
 
   useEffect(() => {
     if (authMode !== "signup" || !authUsername.trim()) { setUsernameStatus(null); return; }
@@ -309,6 +379,28 @@ export default function App() {
   async function fetchHighlights() {
     try { const res = await fetch(`${API_BASE}/highlights?username=${username}`); const data = await res.json(); setHighlights(data.highlights || []); setTodayDate(data.date || ""); } catch (e) {}
   }
+
+  const handleLiveCapture = async () => {
+    if (!username) return; 
+    try {
+      const response = await fetch(`${API_BASE}/capture`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username }) 
+      });
+      const data = await response.json();
+      if (response.ok) {
+        pushToast("New memory captured securely!", "success");
+        fetchMemoryCount();
+        fetchHighlights(); 
+      } else {
+        pushToast("Error capturing memory: " + data.error, "error");
+      }
+    } catch (error) {
+      console.error("Capture failed:", error);
+      pushToast("Failed to connect to the camera backend.", "error");
+    }
+  };
 
   async function openMemoryManager() {
     if (showManager) { setShowManager(false); return; }
@@ -377,32 +469,116 @@ export default function App() {
 
   function handleLogout() { setLoggedIn(false); setView("home"); setUsername(""); setMessages([]); setAuthUsername(""); setAuthPassword(""); pushToast("Logged out.", "success"); }
 
+  // ---------- Text-To-Speech Output ----------
   function speak(text) {
-    if (!speakEnabled) return;
+    if (!speakEnabled) {
+      isProcessingRef.current = false;
+      if (wakeWordEnabledRef.current) {
+        setTimeout(() => { try { recognitionRef.current?.start(); } catch(e){} }, 250);
+      }
+      return;
+    }
+
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = supportMode ? 0.8 : 1.0;
+    
+    utterance.onstart = () => {
+      isProcessingRef.current = true;
+      try { recognitionRef.current?.abort(); } catch(e){}
+    };
+    
+    utterance.onend = () => {
+      isProcessingRef.current = false;
+      if (wakeWordEnabledRef.current) {
+        setTimeout(() => { try { recognitionRef.current?.start(); } catch(e){} }, 250);
+      }
+    };
+    
+    utterance.onerror = () => {
+      isProcessingRef.current = false;
+      if (wakeWordEnabledRef.current) {
+        setTimeout(() => { try { recognitionRef.current?.start(); } catch(e){} }, 250);
+      }
+    };
+
     window.speechSynthesis.speak(utterance);
   }
 
+  // ---------- Unified Mic Button Toggle ----------
   function toggleListening() {
-    if (!recognitionRef.current) { pushToast("Speech recognition isn't supported in this browser. Try Chrome.", "error"); return; }
-    if (listening) { recognitionRef.current.stop(); setListening(false); } else { recognitionRef.current.start(); setListening(true); }
+    if (!recognitionRef.current) { 
+      pushToast("Speech recognition isn't supported in this browser. Try Chrome.", "error"); 
+      return; 
+    }
+    
+    if (wakeWordEnabled) {
+      // Manual Wake-up shortcut
+      isAwakeRef.current = true;
+      playActivationChime();
+      pushToast("Listening...", "info");
+      clearTimeout(awakeTimeoutRef.current);
+      awakeTimeoutRef.current = setTimeout(() => {
+        isAwakeRef.current = false;
+        pushToast("Cortex went back to sleep.", "info");
+      }, 6000);
+    } else {
+      // Normal push-to-talk shortcut
+      if (listening) { 
+        recognitionRef.current.abort(); 
+        setListening(false); 
+      } else { 
+        autoSendRef.current = true;
+        recognitionRef.current.start(); 
+        setListening(true); 
+      }
+    }
   }
 
+  // ---------- Send Message to Cortex ----------
   async function sendMessage(text) {
     const query = (text ?? input).trim();
     if (!query || loading) return;
+    
+    isProcessingRef.current = true;
+    try { recognitionRef.current?.abort(); } catch(e){}
+    
     setMessages((prev) => [...prev, { role: "user", text: query }]);
     setInput(""); setLoading(true);
+    
     try {
       const res = await fetch(`${API_BASE}/query`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, query, support_mode: supportMode }) });
       const data = await res.json();
       const answer = data.answer || "Something went wrong.";
       setMessages((prev) => [...prev, { role: "assistant", text: answer }]);
-      speak(answer);
-    } catch (e) { setMessages((prev) => [...prev, { role: "assistant", text: "I couldn't reach the server." }]); } finally { setLoading(false); }
+      speak(answer); 
+    } catch (e) { 
+      setMessages((prev) => [...prev, { role: "assistant", text: "I couldn't reach the server." }]); 
+      isProcessingRef.current = false;
+      if (wakeWordEnabledRef.current) {
+        setTimeout(() => { try { recognitionRef.current?.start(); } catch(err){} }, 250);
+      }
+    } finally { 
+      setLoading(false); 
+    }
   }
+
+  // Mobile Web Audio Unlock Requirement:
+  const handleWakeWordToggle = () => {
+    const nextState = !wakeWordEnabled;
+    setWakeWordEnabled(nextState);
+    if (nextState) {
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.speak(new SpeechSynthesisUtterance("")); 
+      }
+      isAwakeRef.current = false;
+      pushToast("Hey Cortex active.", "success");
+    } else {
+      isAwakeRef.current = false;
+      clearTimeout(awakeTimeoutRef.current);
+      pushToast("Wake word disabled.", "info");
+    }
+  };
 
   const isDark = theme === "dark";
   const colors = {
@@ -455,13 +631,16 @@ export default function App() {
       `}</style>
 
       {flashScreen && <div style={{ position: "fixed", inset: 0, background: "rgba(10, 132, 255, 0.25)", backdropFilter: "blur(4px)", zIndex: 9999, pointerEvents: "none", transition: "opacity 0.3s ease" }} />}
+      
       <div style={{ position: "fixed", top: 20, right: 20, zIndex: 1000, display: "flex", flexDirection: "column" }}>
         {toasts.map((t) => <Toast key={t.id} toast={t} onDone={() => removeToast(t.id)} />)}
       </div>
+      
       <div style={{ position: "fixed", top: 16, left: 16, zIndex: 1000, display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: colors.subtext, background: colors.panel, padding: "6px 10px", borderRadius: 20, backdropFilter: "blur(10px)", border: `1px solid ${colors.panelBorder}` }}>
         <span style={{ width: 8, height: 8, borderRadius: "50%", background: backendOnline === null ? "#8e8e93" : backendOnline ? "#30d158" : "#ff453a", animation: backendOnline === null ? "pulse 1.5s infinite" : "none" }} />
         {backendOnline === null ? "Checking..." : backendOnline ? "Connected" : "Backend offline"}
       </div>
+      
       {!loggedIn ? (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 20, animation: "popIn 0.5s cubic-bezier(0.4, 0, 0.2, 1)" }}>
           <div style={{ textAlign: "center", marginBottom: 24 }}>
@@ -519,7 +698,7 @@ export default function App() {
             <div style={{ margin: "12px 20px 0", padding: 16, borderRadius: 16, background: colors.panel, border: `1px solid ${colors.panelBorder}`, backdropFilter: "blur(20px)", animation: "popIn 0.3s cubic-bezier(0.4, 0, 0.2, 1)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><div style={{ fontSize: 13, fontWeight: 700, color: colors.subtext }}>ACCESSIBILITY</div><button className="icon-btn" onClick={() => setShowSettings(false)} style={{ background: "transparent", border: "none", color: colors.subtext, fontSize: 16 }}>×</button></div>
               <SettingRow label="Speak responses aloud" value={speakEnabled} onChange={() => setSpeakEnabled(!speakEnabled)} colors={colors} />
-              <SettingRow label='Wake word ("Hey Cortex")' value={wakeWordEnabled} onChange={() => setWakeWordEnabled(!wakeWordEnabled)} colors={colors} />
+              <SettingRow label='Wake word ("Hey Cortex")' value={wakeWordEnabled} onChange={handleWakeWordToggle} colors={colors} />
               <SettingRow label="Dark mode" value={isDark} onChange={() => setTheme(isDark ? "light" : "dark")} colors={colors} />
               <SettingRow label="Memory support mode (larger text, gentler answers)" value={supportMode} onChange={() => setSupportMode(!supportMode)} colors={colors} />
             </div>
@@ -532,7 +711,6 @@ export default function App() {
                 <button className="icon-btn" onClick={() => setShowManager(false)} style={{ background: "transparent", border: "none", color: colors.subtext, fontSize: 16 }}>×</button>
               </div>
 
-              {/* Add Memory Input Field */}
               <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
                 <input
                   placeholder="Add a new memory manually..."
@@ -576,11 +754,21 @@ export default function App() {
             <div ref={chatEndRef} />
           </div>
           
-          {awaitingWakeWord && !listening && <div style={{ textAlign: "center", fontSize: 12, color: colors.subtext, padding: "6px 0", animation: "pulse 2s infinite" }}>Listening for "Hey Cortex"...</div>}
+          {awaitingWakeWord && !listening && !isAwakeRef.current && <div style={{ textAlign: "center", fontSize: 12, color: colors.subtext, padding: "6px 0", animation: "pulse 2s infinite" }}>Listening for "Hey Cortex"...</div>}
           
           <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 20px 22px", background: colors.panel, backdropFilter: "blur(20px)", borderTop: `1px solid ${colors.panelBorder}` }}>
             <button className="icon-btn" onClick={toggleListening} style={{ width: supportMode ? 48 : 40, height: supportMode ? 48 : 40, borderRadius: "50%", border: "none", flexShrink: 0, background: listening ? "#ff453a" : colors.inputBg, color: listening ? "#fff" : colors.text, fontSize: 16 }} title="Speak your question">🎤</button>
-            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendMessage()} placeholder={listening ? "Listening..." : "Ask about your memories..."} style={{ flex: 1, padding: supportMode ? "14px 18px" : "12px 16px", borderRadius: 20, border: `1px solid ${colors.panelBorder}`, background: colors.inputBg, color: colors.text, fontSize: inputFontSize, outline: "none", transition: "background 0.2s" }} />
+            
+            <button 
+              className="icon-btn" 
+              onClick={handleLiveCapture} 
+              style={{ width: supportMode ? 48 : 40, height: supportMode ? 48 : 40, borderRadius: "50%", border: "none", flexShrink: 0, background: colors.inputBg, color: colors.text, fontSize: 16 }} 
+              title="Capture Live Memory"
+            >
+              📸
+            </button>
+
+            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendMessage()} placeholder={listening || isAwakeRef.current ? "Listening..." : "Ask about your memories..."} style={{ flex: 1, padding: supportMode ? "14px 18px" : "12px 16px", borderRadius: 20, border: `1px solid ${colors.panelBorder}`, background: colors.inputBg, color: colors.text, fontSize: inputFontSize, outline: "none", transition: "background 0.2s" }} />
             <button className="primary-btn" onClick={() => sendMessage()} disabled={loading || !input.trim()} style={{ width: supportMode ? 48 : 40, height: supportMode ? 48 : 40, borderRadius: "50%", border: "none", background: colors.userBubble, color: "#fff", fontSize: 16, opacity: loading || !input.trim() ? 0.5 : 1 }}>↑</button>
           </div>
         </div>
